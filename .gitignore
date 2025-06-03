@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*build*/
+*dist*/
+*.egg-info/
+venv/
+env/
+.env
+*.ipynb_checkpoints
+
+# Entornos virtuales específicos de IDEs
+.vscode/
+.idea/
+
+# Archivos de sistema operativo
+.DS_Store
+Thumbs.db
+
+# Datos y Modelos (si decides no versionar los datos directamente,
+# o modelos grandes antes de subirlos a S3, aunque el modelo final
+# irá a S3, los intermedios o pruebas locales no deben subirse)
+# *.csv
+# *.data
+# model.joblib # Si generas un modelo localmente antes de que el pipeline lo suba a S3
+# *.onnx 
+# Archivos de AWS CLI (si los generas localmente)
+.aws/
+
+# Logs
+*.log
+
+# Output de tests
+htmlcov/
+.coverage
