@@ -1,15 +1,7 @@
-# Core ML
+fastapi
+uvicorn[standard]
+boto3
 scikit-learn
 pandas
 joblib
-
-# AWS SDK
-boto3
-
-# ONNX conversion and runtime
-skl2onnx
 onnxruntime
-
-# Jupyter (opcional, si vas a usar notebooks/wine_exploration.ipynb)
-notebook
-jupyterlab
