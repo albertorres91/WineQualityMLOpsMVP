@@ -1,3 +1,57 @@
+name: Wine Quality CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - dev
+      - prod
+  workflow_dispatch: {} # Permite ejecución manual, {} indica que no hay sub-configuraciones
+
+jobs:
+  train_and_test:
+    name: Train Model & Run Tests
+    runs-on: ubuntu-latest
+    outputs:
+      test_status: ${{ steps.run_model_tests.outcome }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements_dev.txt
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
+
+      - name: Run training script (uploads model and scaler to S3)
+        env:
+          S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+          S3_MODEL_KEY_ONNX: "wine_quality_model.onnx"
+          S3_SCALER_KEY: "wine_quality_scaler.joblib"
+        run: python scripts/train.py
+
+      - name: Run model tests (downloads from S3)
+        id: run_model_tests
+        env:
+          S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+          S3_MODEL_KEY_ONNX: "wine_quality_model.onnx"
+          S3_SCALER_KEY: "wine_quality_scaler.joblib"
+          S3_TEST_FEATURES_KEY: "test_data/test_features.csv"
+          S3_TEST_LABELS_KEY: "test_data/test_labels.csv"
+        run: python scripts/model_tester.py
+
   build_and_deploy:
     name: Build Docker Image & Deploy to Lambda
     runs-on: ubuntu-latest
@@ -31,7 +85,7 @@
             LAMBDA_FUNCTION_NAME="wineQualityApi-prod"
             IMAGE_TAG_SUFFIX="prod"
           else
-            echo "::error::Branch no configurada para despliegue."
+            echo "::error::Branch no configurada para despliegue: ${{ github.ref_name }}"
             exit 1
           fi
           
@@ -42,23 +96,22 @@
           echo "ecr_repository_name=mlops-proj" >> $GITHUB_OUTPUT
 
       - name: Build, tag, and push image to Amazon ECR
-        # La clave env se aplica al entorno del comando 'run'
         env:
           ECR_REGISTRY: ${{ steps.set_env_vars.outputs.ecr_registry }}
           ECR_REPOSITORY: ${{ steps.set_env_vars.outputs.ecr_repository_name }}
           TAG_LATEST: ${{ steps.set_env_vars.outputs.image_tag_latest }}
           TAG_COMMIT: ${{ steps.set_env_vars.outputs.image_tag_commit }}
-        run: | # <--- 'run' ESTABA FALTANDO O MAL COLOCADO CON RESPECTO A 'env'
+        run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$TAG_LATEST -t $ECR_REGISTRY/$ECR_REPOSITORY:$TAG_COMMIT ./app
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$TAG_LATEST
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$TAG_COMMIT
           echo "Pushed to $ECR_REGISTRY/$ECR_REPOSITORY with tags $TAG_LATEST and $TAG_COMMIT"
 
       - name: Update Lambda Function
-        env: # <--- 'env' debe estar al mismo nivel que 'run' o 'uses'
+        env:
           LAMBDA_FUNCTION_TO_UPDATE: ${{ steps.set_env_vars.outputs.lambda_function_name }}
           ECR_IMAGE_URI_WITH_TAG: "${{ steps.set_env_vars.outputs.ecr_registry }}/${{ steps.set_env_vars.outputs.ecr_repository_name }}:${{ steps.set_env_vars.outputs.image_tag_latest }}"
-        run: | # <--- 'run' ESTABA FALTANDO O MAL COLOCADO CON RESPECTO A 'env'
+        run: |
           echo "Updating Lambda function: $LAMBDA_FUNCTION_TO_UPDATE with image $ECR_IMAGE_URI_WITH_TAG"
           aws lambda update-function-code \
             --function-name "$LAMBDA_FUNCTION_TO_UPDATE" \
