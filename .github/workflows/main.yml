@@ -52,6 +52,7 @@ jobs:
           S3_TEST_LABELS_KEY: "test_data/test_labels.csv"
         run: python scripts/model_tester.py
 
+jobs:
   build_and_deploy:
     name: Build Docker Image & Deploy to Lambda
     runs-on: ubuntu-latest
