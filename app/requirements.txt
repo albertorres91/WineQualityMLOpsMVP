@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 boto3
 scikit-learn
-pandas
+#pandas
 joblib
 onnxruntime
+numpy
