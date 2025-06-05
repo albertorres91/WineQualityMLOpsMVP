@@ -5,27 +5,17 @@ on:
     branches:
       - dev
       - prod
-  workflow_dispatch: {} # Permite ejecución manual
+  workflow_dispatch: {}
 
 jobs:
-  tests_suite: # Job renombrado para incluir todas las pruebas
+  tests_suite:
     name: Run Unit and Model Integration Tests
     runs-on: ubuntu-latest
     outputs:
-      # Esta salida indicará si todas las pruebas (unitarias Y de modelo) pasaron.
-      # Asumimos que si model_tests no se ejecuta (porque unit_tests falló), 
-      # su 'outcome' no será 'success', haciendo que all_tests_passed sea false.
-      # O, más explícito, podemos comprobar ambos outcomes.
-      all_tests_passed: ${{ (steps.run_unit_tests.outcome == 'success') && (steps.run_model_integration_tests.outcome == 'success' || steps.run_unit_tests.outcome != 'success') }}
-      # Explicación de la lógica de all_tests_passed:
-      # - Ambas deben ser 'success'.
-      # - O, si unit_tests NO fue 'success', entonces model_integration_tests no se ejecuta,
-      #   y queremos que all_tests_passed sea false. La segunda parte de la OR (||) asegura esto.
-      # Alternativa más simple si model_integration_tests no se ejecuta si unit_tests falla:
-      # all_tests_passed: ${{ steps.run_model_integration_tests.outcome == 'success' }}
-      # Pero para ser explícitos con el requerimiento de que las pruebas unitarias deben pasar:
-      # Optaremos por una lógica que el 'if' del siguiente job pueda manejar fácilmente.
-      # La condición 'if' en el siguiente job se simplificará.
+      # La salida del job tests_suite es simplemente su resultado general.
+      # El siguiente job usará needs.tests_suite.result == 'success'.
+      # No es necesario un output específico aquí si el 'if' del siguiente job es robusto.
+      _placeholder: "to ensure outputs are processed" # Placeholder si no hay otros outputs
 
     steps:
       - name: Checkout code
@@ -39,22 +29,21 @@ jobs:
       - name: Install dependencies (including pytest)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements_dev.txt # Asegúrate que pytest esté en este archivo
+          pip install -r requirements_dev.txt
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-2 # Tu región
+          aws-region: us-east-2
 
       - name: Run Unit Tests with Pytest
         id: run_unit_tests
-        run: pytest tests/ # pytest buscará y ejecutará tests en la carpeta tests/
+        run: pytest tests/
 
       - name: Run model integration tests (downloads from S3)
-        id: run_model_integration_tests # ID actualizado para claridad
-        # Solo ejecutar si las pruebas unitarias pasaron
+        id: run_model_integration_tests
         if: steps.run_unit_tests.outcome == 'success'
         env:
           S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
@@ -62,25 +51,17 @@ jobs:
           S3_SCALER_KEY: "wine_quality_scaler.joblib"
           S3_TEST_FEATURES_KEY: "test_data/test_features.csv"
           S3_TEST_LABELS_KEY: "test_data/test_labels.csv"
-          # MINIMUM_ACCURACY_THRESHOLD: "0.70" # Puedes pasar esto como env var si quieres o si el script lo lee
         run: python scripts/model_tester.py
-        # El script model_tester.py saldrá con código 1 si los tests fallan
 
-  build_and_deploy:
-    name: Build Docker Image & Deploy to Lambda
+  build_and_push_ecr: # Job para construir y pushear la imagen a ECR, común para ambos entornos
+    name: Build & Push Docker Image to ECR
     runs-on: ubuntu-latest
-    needs: tests_suite # Depende del job renombrado
-    # Ejecutar solo si AMBAS pruebas (unitaria y de modelo) fueron exitosas.
-    # Si run_unit_tests falla, run_model_integration_tests no se ejecuta (debido a su 'if'),
-    # pero su 'outcome' no sería 'success'. Necesitamos asegurar que build_and_deploy
-    # solo corra si run_unit_tests fue 'success' Y run_model_integration_tests fue 'success'.
-    # El 'if' del paso run_model_integration_tests ya maneja la dependencia de las pruebas unitarias.
-    # Entonces, solo necesitamos que run_model_integration_tests sea 'success'.
-    # Si run_unit_tests falla, el job tests_suite fallará en ese punto, y build_and_deploy no correrá.
-    # Si run_unit_tests pasa, pero run_model_integration_tests falla, el job tests_suite fallará, y build_and_deploy no correrá.
-    # Por lo tanto, podemos simplificar la condición aquí o ser muy explícitos.
-    # Para cumplir el requisito de que "el push desde dev haya pasado unas pruebas unitarias":
-    if: needs.tests_suite.result == 'success' # El job 'tests_suite' completo debe ser exitoso
+    needs: tests_suite
+    if: needs.tests_suite.result == 'success'
+    outputs:
+      ecr_image_latest_tagged: ${{ steps.docker_meta.outputs.ecr_image_latest_tagged }}
+      ecr_image_commit_tagged: ${{ steps.docker_meta.outputs.ecr_image_commit_tagged }}
+      ecr_registry_uri: ${{ steps.docker_meta.outputs.ecr_registry_uri }} # Para login en EC2
 
     steps:
       - name: Checkout code
@@ -97,45 +78,104 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Set up environment variables for deployment
-        id: set_env_vars
+      - name: Set up Docker image tags based on branch
+        id: docker_meta
         run: |
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          ECR_REPOSITORY="mlops-proj" # Tu nombre de repositorio ECR
           IMAGE_TAG_SUFFIX=""
-          LAMBDA_FUNCTION_NAME=""
+
           if [ "${{ github.ref_name }}" == "dev" ]; then
-            LAMBDA_FUNCTION_NAME="wineQualityApi-dev"
-            IMAGE_TAG_SUFFIX="dev"
+            IMAGE_TAG_SUFFIX="dev-ec2"
           elif [ "${{ github.ref_name }}" == "prod" ]; then
-            LAMBDA_FUNCTION_NAME="wineQualityApi-prod"
-            IMAGE_TAG_SUFFIX="prod"
+            IMAGE_TAG_SUFFIX="prod-lambda"
           else
-            echo "::error::Branch no configurada para despliegue: ${{ github.ref_name }}"
+            echo "::error::Branch no configurada para etiquetado de imagen: ${{ github.ref_name }}"
             exit 1
           fi
           
-          echo "lambda_function_name=${LAMBDA_FUNCTION_NAME}" >> $GITHUB_OUTPUT
-          echo "image_tag_latest=latest-${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
-          echo "image_tag_commit=${{ github.sha }}-${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT
-          echo "ecr_registry=${{ steps.login-ecr.outputs.registry }}" >> $GITHUB_OUTPUT
-          echo "ecr_repository_name=mlops-proj" >> $GITHUB_OUTPUT
+          IMAGE_TAG_LATEST="latest-${IMAGE_TAG_SUFFIX}"
+          IMAGE_TAG_COMMIT="${{ github.sha }}-${IMAGE_TAG_SUFFIX}"
 
-      - name: Build, tag, and push image to Amazon ECR
-        env:
-          ECR_REGISTRY: ${{ steps.set_env_vars.outputs.ecr_registry }}
-          ECR_REPOSITORY: ${{ steps.set_env_vars.outputs.ecr_repository_name }}
-          TAG_LATEST: ${{ steps.set_env_vars.outputs.image_tag_latest }}
-          TAG_COMMIT: ${{ steps.set_env_vars.outputs.image_tag_commit }}
-        run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$TAG_LATEST -t $ECR_REGISTRY/$ECR_REPOSITORY:$TAG_COMMIT ./app
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$TAG_LATEST
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$TAG_COMMIT
-          echo "Pushed to $ECR_REGISTRY/$ECR_REPOSITORY with tags $TAG_LATEST and $TAG_COMMIT"
+          echo "ecr_image_latest_tagged=${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG_LATEST}" >> $GITHUB_OUTPUT
+          echo "ecr_image_commit_tagged=${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG_COMMIT}" >> $GITHUB_OUTPUT
+          echo "ecr_registry_uri=${ECR_REGISTRY}" >> $GITHUB_OUTPUT # Para login en EC2
 
-      - name: Update Lambda Function
-        env:
-          LAMBDA_FUNCTION_TO_UPDATE: ${{ steps.set_env_vars.outputs.lambda_function_name }}
-          ECR_IMAGE_URI_WITH_TAG: "${{ steps.set_env_vars.outputs.ecr_registry }}/${{ steps.set_env_vars.outputs.ecr_repository_name }}:${{ steps.set_env_vars.outputs.image_tag_latest }}"
+      - name: Build and push Docker image to ECR
         run: |
+          docker build -t ${{ steps.docker_meta.outputs.ecr_image_latest_tagged }} -t ${{ steps.docker_meta.outputs.ecr_image_commit_tagged }} ./app
+          docker push ${{ steps.docker_meta.outputs.ecr_image_latest_tagged }}
+          docker push ${{ steps.docker_meta.outputs.ecr_image_commit_tagged }}
+          echo "Pushed to ECR with tags ${{ steps.docker_meta.outputs.ecr_image_latest_tagged }} and ${{ steps.docker_meta.outputs.ecr_image_commit_tagged }}"
+
+  deploy_dev_to_ec2:
+    name: Deploy to Dev EC2 Instance
+    runs-on: ubuntu-latest
+    needs: build_and_push_ecr # Depende de que la imagen esté en ECR
+    if: github.ref_name == 'dev' # Solo para la rama dev
+
+    steps:
+      - name: Configure AWS Credentials # Aunque el rol de EC2 lo maneja, el login ECR en EC2 lo puede usar
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }} # No estrictamente necesario si el rol de EC2 tiene todo
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }} # No estrictamente necesario
+          aws-region: us-east-2
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEV_EC2_HOST }} # 52.15.68.156
+          username: ${{ secrets.DEV_EC2_USERNAME }} # ubuntu
+          key: ${{ secrets.DEV_EC2_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+            echo "INFO: Conectado a EC2 Dev (${{ secrets.DEV_EC2_HOST }})"
+            aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin ${{ needs.build_and_push_ecr.outputs.ecr_registry_uri }}
+            echo "INFO: Docker login a ECR exitoso en EC2."
+            
+            docker stop wine-api-dev-container || echo "WARN: Contenedor wine-api-dev-container no encontrado o no se pudo detener."
+            docker rm wine-api-dev-container || echo "WARN: Contenedor wine-api-dev-container no encontrado o no se pudo eliminar."
+            
+            echo "INFO: Haciendo pull de la nueva imagen ${{ needs.build_and_push_ecr.outputs.ecr_image_latest_tagged }}..."
+            docker pull ${{ needs.build_and_push_ecr.outputs.ecr_image_latest_tagged }}
+            
+            echo "INFO: Ejecutando el nuevo contenedor..."
+            docker run -d \
+              -p 8000:8000 \
+              -e S3_BUCKET_NAME=${{ secrets.S3_BUCKET_NAME }} \
+              -e S3_MODEL_KEY_ONNX="wine_quality_model.onnx" \
+              -e S3_SCALER_KEY="wine_quality_scaler.joblib" \
+              -e PREDICTION_LOG_KEY_PREFIX="predictions/wine_quality" \
+              -e ENVIRONMENT_NAME="dev-ec2" \
+              --name wine-api-dev-container \
+              ${{ needs.build_and_push_ecr.outputs.ecr_image_latest_tagged }}
+            
+            echo "INFO: Contenedor desplegado y ejecutándose en EC2 Dev."
+            sleep 10
+            docker logs --tail 20 wine-api-dev-container
+            echo "INFO: Despliegue a EC2 Dev completado."
+
+  deploy_prod_to_lambda:
+    name: Deploy to Prod Lambda
+    runs-on: ubuntu-latest
+    needs: build_and_push_ecr # Depende de que la imagen esté en ECR
+    if: github.ref_name == 'prod' # Solo para la rama prod
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
+
+      - name: Update Prod Lambda Function
+        run: |
+          LAMBDA_FUNCTION_TO_UPDATE="wineQualityApi-prod" # Nombre fijo para prod
+          ECR_IMAGE_URI_WITH_TAG="${{ needs.build_and_push_ecr.outputs.ecr_image_latest_tagged }}" # Usa la imagen con etiqueta latest-prod-lambda
+
           echo "Updating Lambda function: $LAMBDA_FUNCTION_TO_UPDATE with image $ECR_IMAGE_URI_WITH_TAG"
           aws lambda update-function-code \
             --function-name "$LAMBDA_FUNCTION_TO_UPDATE" \
