@@ -13,3 +13,4 @@ onnxruntime
 # Jupyter (opcional, si vas a usar notebooks/wine_exploration.ipynb)
 notebook
 jupyterlab
+pytest
