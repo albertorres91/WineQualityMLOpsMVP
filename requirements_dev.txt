@@ -10,7 +10,7 @@ boto3
 skl2onnx
 onnxruntime
 
-# Jupyter (opcional, si vas a usar notebooks/wine_exploration.ipynb)
+# Jupyter 
 notebook
 jupyterlab
 pytest
